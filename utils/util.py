@@ -551,16 +551,16 @@ class ComputeLoss:
         bboxes = (pred_bboxes.detach() * strides).type(gt_bboxes.dtype)
         target_bboxes, target_scores, fg_mask, _ = self.assigner(scores, bboxes,
                                                                  anchors * strides,
-                                                                 gt_labels, gt_bboxes, mask_gt)[:4]
+                                                                 gt_labels, gt_bboxes, mask_gt)
 
         target_scores_sum = max(target_scores.sum(), 1)
 
         # cls loss
-        if target_scores.shape[-1] != pred_scores.shape[-1]:
-            num_classes = pred_scores.shape[-1]
-            target_scores_onehot = torch.zeros_like(pred_scores)
-            target_scores_onehot.scatter_(-1, target_scores.long(), 1.0)
-            target_scores = target_scores_onehot
+        # if target_scores.shape[-1] != pred_scores.shape[-1]:
+        #     num_classes = pred_scores.shape[-1]
+        #     target_scores_onehot = torch.zeros_like(pred_scores)
+        #     target_scores_onehot.scatter_(-1, target_scores.long(), 1.0)
+        #     target_scores = target_scores_onehot
         loss_cls = self.cls_loss(pred_scores, target_scores.to(pred_scores.dtype)).sum()
         loss_cls = loss_cls / target_scores_sum
 

@@ -1,19 +1,14 @@
 import torch
 from utils.util import make_anchors
 
-# تغییر به torch.ao برای PyTorch >= 1.13
-from torch.ao.nn.quantized import FloatFunctional
-from torch.ao.quantization import QuantStub, DeQuantStub
-
 
 class SiLU(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.sigmoid = torch.nn.Sigmoid()
-        self.float_fn = FloatFunctional()
 
     def forward(self, x):
-        return self.float_fn.mul(self.sigmoid(x), x)
+        return x * self.sigmoid(x)  # نیازی به FloatFunctional نیست
 
 
 class Conv(torch.nn.Module):
@@ -33,12 +28,11 @@ class Residual(torch.nn.Module):
         self.add_m = add
         self.conv1 = Conv(ch, ch, 3)
         self.conv2 = Conv(ch, ch, 3)
-        self.quant = FloatFunctional()
 
     def forward(self, x):
         y = self.conv1(x)
         y = self.conv2(y)
-        return self.quant.add(x, y) if self.add_m else y
+        return x + y if self.add_m else y  # حذف FloatFunctional
 
 
 class CSP(torch.nn.Module):
@@ -46,13 +40,12 @@ class CSP(torch.nn.Module):
         super().__init__()
         self.conv1 = Conv(in_ch, out_ch)
         self.conv2 = Conv((2 + n) * out_ch // 2, out_ch)
-        self.quant = FloatFunctional()
         self.res_m = torch.nn.ModuleList(Residual(out_ch // 2, add) for _ in range(n))
 
     def forward(self, x):
         y = list(self.conv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.res_m)
-        return self.conv2(self.quant.cat(y, dim=1))
+        return self.conv2(torch.cat(y, dim=1))  # حذف FloatFunctional
 
 
 class SPP(torch.nn.Module):
@@ -61,13 +54,12 @@ class SPP(torch.nn.Module):
         self.conv1 = Conv(in_ch, in_ch // 2)
         self.conv2 = Conv(in_ch * 2, out_ch)
         self.res_m = torch.nn.MaxPool2d(k, 1, k // 2)
-        self.quant = FloatFunctional()
 
     def forward(self, x):
         x = self.conv1(x)
         y1 = self.res_m(x)
         y2 = self.res_m(y1)
-        return self.conv2(self.quant.cat([x, y1, y2, self.res_m(y2)], 1))
+        return self.conv2(torch.cat([x, y1, y2, self.res_m(y2)], 1))
 
 
 class DarkNet(torch.nn.Module):
@@ -106,8 +98,7 @@ class DarkNet(torch.nn.Module):
 class DarkFPN(torch.nn.Module):
     def __init__(self, width, depth):
         super().__init__()
-        self.fn = FloatFunctional()
-        self.up = torch.nn.Upsample(scale_factor=2)
+        self.up = torch.nn.Upsample(scale_factor=2, mode='nearest')  # اضافه شدن mode
         self.h1 = CSP(width[4] + width[5], width[4], depth[0], False)
         self.h2 = CSP(width[3] + width[4], width[3], depth[0], False)
         self.h3 = Conv(width[3], width[3], 3, 2)
@@ -116,38 +107,38 @@ class DarkFPN(torch.nn.Module):
         self.h6 = CSP(width[4] + width[5], width[5], depth[0], False)
 
     def forward(self, p3, p4, p5):
-        p4 = self.h1(self.fn.cat([self.up(p5), p4], 1))
-        p3 = self.h2(self.fn.cat([self.up(p4), p3], 1))
-        p4 = self.h4(self.fn.cat([self.h3(p3), p4], 1))
-        p5 = self.h6(self.fn.cat([self.h5(p4), p5], 1))
+        p4 = self.h1(torch.cat([self.up(p5), p4], 1))
+        p3 = self.h2(torch.cat([self.up(p4), p3], 1))
+        p4 = self.h4(torch.cat([self.h3(p3), p4], 1))
+        p5 = self.h6(torch.cat([self.h5(p4), p5], 1))
         return p3, p4, p5
 
 
 class Head(torch.nn.Module):
     def __init__(self, nc=80, ch=()):
         super().__init__()
-        self.nc = nc
-        self.no = nc + 4
-        self.stride = torch.zeros(len(ch))
+        self.nc = nc  # number of classes
+        self.no = nc + 4  # number of outputs per anchor
+        self.stride = torch.zeros(len(ch))  # strides computed during build
 
         box = max(64, ch[0] // 4)
         cls = max(80, ch[0], self.nc)
-        self.fn = FloatFunctional()
 
-        self.box = torch.nn.ModuleList(
-            torch.nn.Sequential(Conv(x, box, 3), Conv(box, box, 3), torch.nn.Conv2d(box, 4, 1))
-            for x in ch
-        )
-        self.cls = torch.nn.ModuleList(
-            torch.nn.Sequential(Conv(x, cls, 3), Conv(cls, cls, 3), torch.nn.Conv2d(cls, self.nc, 1))
-            for x in ch
-        )
+        self.box = torch.nn.ModuleList(torch.nn.Sequential(
+            Conv(x, box, 3),
+            Conv(box, box, 3),
+            torch.nn.Conv2d(box, 4, 1)
+        ) for x in ch)
+
+        self.cls = torch.nn.ModuleList(torch.nn.Sequential(
+            Conv(x, cls, 3),
+            Conv(cls, cls, 3),
+            torch.nn.Conv2d(cls, self.nc, 1)
+        ) for x in ch)
 
     def forward(self, p3, p4, p5):
         x = [p3, p4, p5]
-        for i, (box, cls) in enumerate(zip(self.box, self.cls)):
-            x[i] = self.fn.cat((box(x[i]), cls(x[i])), 1)
-        return x
+        return [torch.cat((box(f), cls(f)), 1) for f, box, cls in zip(x, self.box, self.cls)]
 
 
 class YOLO(torch.nn.Module):
@@ -155,7 +146,6 @@ class YOLO(torch.nn.Module):
         super().__init__()
         self.net = DarkNet(width, depth)
         self.fpn = DarkFPN(width, depth)
-
         img_dummy = torch.zeros(1, width[0], 256, 256)
         self.head = Head(num_classes, (width[3], width[4], width[5]))
         self.head.stride = torch.tensor([256 / x.shape[-2] for x in self.forward(img_dummy)])
@@ -171,9 +161,8 @@ class QAT(torch.nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
-        self.quant = QuantStub()
-        self.de_quant = DeQuantStub()
-
+        self.quant = torch.quantization.QuantStub()
+        self.de_quant = torch.quantization.DeQuantStub()
         self.nc = self.model.head.nc
         self.no = self.model.head.no
         self.stride = self.model.stride
@@ -181,15 +170,40 @@ class QAT(torch.nn.Module):
     def forward(self, x):
         x = self.quant(x)
         x = self.model(x)
-        for i in range(len(x)):
-            x[i] = self.de_quant(x[i])
-        return x
-
+        return [self.de_quant(f) for f in x]
 
 # Factory functions
-def yolo_v8_n(num_classes=80): return YOLO([3, 16, 32, 64, 128, 256], [1, 2, 2], num_classes)
-def yolo_v8_t(num_classes=80): return YOLO([3, 24, 48, 96, 192, 384], [1, 2, 2], num_classes)
-def yolo_v8_s(num_classes=80): return YOLO([3, 32, 64, 128, 256, 512], [1, 2, 2], num_classes)
-def yolo_v8_m(num_classes=80): return YOLO([3, 48, 96, 192, 384, 576], [2, 4, 4], num_classes)
-def yolo_v8_l(num_classes=80): return YOLO([3, 64, 128, 256, 512, 512], [3, 6, 6], num_classes)
-def yolo_v8_x(num_classes=80): return YOLO([3, 80, 160, 320, 640, 640], [3, 6, 6], num_classes)
+def yolo_v8_n(num_classes: int = 80):
+    depth = [1, 2, 2]
+    width = [3, 16, 32, 64, 128, 256]
+    return YOLO(width, depth, num_classes)
+
+
+def yolo_v8_t(num_classes: int = 80):
+    depth = [1, 2, 2]
+    width = [3, 24, 48, 96, 192, 384]
+    return YOLO(width, depth, num_classes)
+
+
+def yolo_v8_s(num_classes: int = 80):
+    depth = [1, 2, 2]
+    width = [3, 32, 64, 128, 256, 512]
+    return YOLO(width, depth, num_classes)
+
+
+def yolo_v8_m(num_classes: int = 80):
+    depth = [2, 4, 4]
+    width = [3, 48, 96, 192, 384, 576]
+    return YOLO(width, depth, num_classes)
+
+
+def yolo_v8_l(num_classes: int = 80):
+    depth = [3, 6, 6]
+    width = [3, 64, 128, 256, 512, 512]
+    return YOLO(width, depth, num_classes)
+
+
+def yolo_v8_x(num_classes: int = 80):
+    depth = [3, 6, 6]
+    width = [3, 80, 160, 320, 640, 640]
+    return YOLO(width, depth, num_classes)
