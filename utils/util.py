@@ -161,8 +161,8 @@ def smooth(y, f=0.05):
 def compute_ap(tp, conf, pred_cls, target_cls, eps=1E-16):
     """
     Compute the average precision, given the recall and precision curves.
-    Source: https://github.com/rafaelpadilla/Object-Detection-Metrics.
     # Arguments
+    Source: https://github.com/rafaelpadilla/Object-Detection-Metrics.
         tp:  True positives (nparray, nx1 or nx10).
         conf:  Object-ness value from 0-1 (nparray).
         pred_cls:  Predicted object classes (nparray).
@@ -472,7 +472,7 @@ class Assigner:
         pos_overlaps = (overlaps * mask_pos).amax(axis=-1, keepdim=True)
         norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
         target_scores = target_scores * norm_align_metric
-
+        
         return target_bboxes, target_scores, fg_mask.bool(), target_gt_idx
 
 
@@ -551,11 +551,16 @@ class ComputeLoss:
         bboxes = (pred_bboxes.detach() * strides).type(gt_bboxes.dtype)
         target_bboxes, target_scores, fg_mask, _ = self.assigner(scores, bboxes,
                                                                  anchors * strides,
-                                                                 gt_labels, gt_bboxes, mask_gt)
+                                                                 gt_labels, gt_bboxes, mask_gt)[:4]
 
         target_scores_sum = max(target_scores.sum(), 1)
 
         # cls loss
+        if target_scores.shape[-1] != pred_scores.shape[-1]:
+            num_classes = pred_scores.shape[-1]
+            target_scores_onehot = torch.zeros_like(pred_scores)
+            target_scores_onehot.scatter_(-1, target_scores.long(), 1.0)
+            target_scores = target_scores_onehot
         loss_cls = self.cls_loss(pred_scores, target_scores.to(pred_scores.dtype)).sum()
         loss_cls = loss_cls / target_scores_sum
 

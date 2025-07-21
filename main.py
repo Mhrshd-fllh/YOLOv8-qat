@@ -281,19 +281,19 @@ def main():
     parser = ArgumentParser()
     parser.add_argument('--input-size', default=640, type=int)
     parser.add_argument('--batch-size', default=32, type=int)
-    parser.add_argument('--local_rank', default=0, type=int)
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--train', action='store_true')
     parser.add_argument('--test', action='store_true')
+    parser.add_argument('--local_rank', default=0, type=int, help='For distributed training')
 
     args = parser.parse_args()
 
-    args.local_rank = int(os.getenv('LOCAL_RANK', 0))
-    args.world_size = int(os.getenv('WORLD_SIZE', 1))
-    args.distributed = int(os.getenv('WORLD_SIZE', 1)) > 1
+    args.local_rank = int(os.environ.get('LOCAL_RANK', args.local_rank))
+    args.world_size = int(os.environ.get('WORLD_SIZE', 1))
+    args.distributed = args.world_size > 1
 
     if args.distributed:
-        torch.cuda.set_device(device=args.local_rank)
+        torch.cuda.set_device(args.local_rank)
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
 
     if args.local_rank == 0:
