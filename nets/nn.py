@@ -1,13 +1,16 @@
 import torch
-
 from utils.util import make_anchors
+
+# تغییر به torch.ao برای PyTorch >= 1.13
+from torch.ao.nn.quantized import FloatFunctional
+from torch.ao.quantization import QuantStub, DeQuantStub
 
 
 class SiLU(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.sigmoid = torch.nn.Sigmoid()
-        self.float_fn = torch.nn.quantized.FloatFunctional()
+        self.float_fn = FloatFunctional()
 
     def forward(self, x):
         return self.float_fn.mul(self.sigmoid(x), x)
@@ -30,7 +33,7 @@ class Residual(torch.nn.Module):
         self.add_m = add
         self.conv1 = Conv(ch, ch, 3)
         self.conv2 = Conv(ch, ch, 3)
-        self.quant = torch.nn.quantized.FloatFunctional()
+        self.quant = FloatFunctional()
 
     def forward(self, x):
         y = self.conv1(x)
@@ -43,7 +46,7 @@ class CSP(torch.nn.Module):
         super().__init__()
         self.conv1 = Conv(in_ch, out_ch)
         self.conv2 = Conv((2 + n) * out_ch // 2, out_ch)
-        self.quant = torch.nn.quantized.FloatFunctional()
+        self.quant = FloatFunctional()
         self.res_m = torch.nn.ModuleList(Residual(out_ch // 2, add) for _ in range(n))
 
     def forward(self, x):
@@ -58,7 +61,7 @@ class SPP(torch.nn.Module):
         self.conv1 = Conv(in_ch, in_ch // 2)
         self.conv2 = Conv(in_ch * 2, out_ch)
         self.res_m = torch.nn.MaxPool2d(k, 1, k // 2)
-        self.quant = torch.nn.quantized.FloatFunctional()
+        self.quant = FloatFunctional()
 
     def forward(self, x):
         x = self.conv1(x)
@@ -70,33 +73,26 @@ class SPP(torch.nn.Module):
 class DarkNet(torch.nn.Module):
     def __init__(self, width, depth):
         super().__init__()
-        self.p1 = []
-        self.p2 = []
-        self.p3 = []
-        self.p4 = []
-        self.p5 = []
-
-        # p1/2
-        self.p1.append(Conv(width[0], width[1], 3, 2))
-        # p2/4
-        self.p2.append(Conv(width[1], width[2], 3, 2))
-        self.p2.append(CSP(width[2], width[2], depth[0]))
-        # p3/8
-        self.p3.append(Conv(width[2], width[3], 3, 2))
-        self.p3.append(CSP(width[3], width[3], depth[1]))
-        # p4/16
-        self.p4.append(Conv(width[3], width[4], 3, 2))
-        self.p4.append(CSP(width[4], width[4], depth[2]))
-        # p5/32
-        self.p5.append(Conv(width[4], width[5], 3, 2))
-        self.p5.append(CSP(width[5], width[5], depth[0]))
-        self.p5.append(SPP(width[5], width[5]))
-
-        self.p1 = torch.nn.Sequential(*self.p1)
-        self.p2 = torch.nn.Sequential(*self.p2)
-        self.p3 = torch.nn.Sequential(*self.p3)
-        self.p4 = torch.nn.Sequential(*self.p4)
-        self.p5 = torch.nn.Sequential(*self.p5)
+        self.p1 = torch.nn.Sequential(
+            Conv(width[0], width[1], 3, 2)
+        )
+        self.p2 = torch.nn.Sequential(
+            Conv(width[1], width[2], 3, 2),
+            CSP(width[2], width[2], depth[0])
+        )
+        self.p3 = torch.nn.Sequential(
+            Conv(width[2], width[3], 3, 2),
+            CSP(width[3], width[3], depth[1])
+        )
+        self.p4 = torch.nn.Sequential(
+            Conv(width[3], width[4], 3, 2),
+            CSP(width[4], width[4], depth[2])
+        )
+        self.p5 = torch.nn.Sequential(
+            Conv(width[4], width[5], 3, 2),
+            CSP(width[5], width[5], depth[0]),
+            SPP(width[5], width[5])
+        )
 
     def forward(self, x):
         p1 = self.p1(x)
@@ -110,8 +106,8 @@ class DarkNet(torch.nn.Module):
 class DarkFPN(torch.nn.Module):
     def __init__(self, width, depth):
         super().__init__()
-        self.fn = torch.nn.quantized.FloatFunctional()
-        self.up = torch.nn.Upsample(size=None, scale_factor=2)
+        self.fn = FloatFunctional()
+        self.up = torch.nn.Upsample(scale_factor=2)
         self.h1 = CSP(width[4] + width[5], width[4], depth[0], False)
         self.h2 = CSP(width[3] + width[4], width[3], depth[0], False)
         self.h3 = Conv(width[3], width[3], 3, 2)
@@ -128,24 +124,24 @@ class DarkFPN(torch.nn.Module):
 
 
 class Head(torch.nn.Module):
-
     def __init__(self, nc=80, ch=()):
         super().__init__()
-        self.nc = nc  # number of classes
-        self.no = nc + 4  # number of outputs per anchor
-        self.stride = torch.zeros(len(ch))  # strides computed during build
+        self.nc = nc
+        self.no = nc + 4
+        self.stride = torch.zeros(len(ch))
 
         box = max(64, ch[0] // 4)
         cls = max(80, ch[0], self.nc)
+        self.fn = FloatFunctional()
 
-        self.fn = torch.nn.quantized.FloatFunctional()
-
-        self.box = torch.nn.ModuleList(torch.nn.Sequential(Conv(x, box, 3),
-                                                           Conv(box, box, 3),
-                                                           torch.nn.Conv2d(box, 4, 1)) for x in ch)
-        self.cls = torch.nn.ModuleList(torch.nn.Sequential(Conv(x, cls, 3),
-                                                           Conv(cls, cls, 3),
-                                                           torch.nn.Conv2d(cls, self.nc, 1)) for x in ch)
+        self.box = torch.nn.ModuleList(
+            torch.nn.Sequential(Conv(x, box, 3), Conv(box, box, 3), torch.nn.Conv2d(box, 4, 1))
+            for x in ch
+        )
+        self.cls = torch.nn.ModuleList(
+            torch.nn.Sequential(Conv(x, cls, 3), Conv(cls, cls, 3), torch.nn.Conv2d(cls, self.nc, 1))
+            for x in ch
+        )
 
     def forward(self, p3, p4, p5):
         x = [p3, p4, p5]
@@ -155,7 +151,6 @@ class Head(torch.nn.Module):
 
 
 class YOLO(torch.nn.Module):
-
     def __init__(self, width, depth, num_classes):
         super().__init__()
         self.net = DarkNet(width, depth)
@@ -173,12 +168,11 @@ class YOLO(torch.nn.Module):
 
 
 class QAT(torch.nn.Module):
-
     def __init__(self, model):
         super().__init__()
         self.model = model
-        self.quant = torch.quantization.QuantStub()
-        self.de_quant = torch.quantization.DeQuantStub()
+        self.quant = QuantStub()
+        self.de_quant = DeQuantStub()
 
         self.nc = self.model.head.nc
         self.no = self.model.head.no
@@ -187,43 +181,15 @@ class QAT(torch.nn.Module):
     def forward(self, x):
         x = self.quant(x)
         x = self.model(x)
-
         for i in range(len(x)):
             x[i] = self.de_quant(x[i])
         return x
 
 
-def yolo_v8_n(num_classes: int = 80):
-    depth = [1, 2, 2]
-    width = [3, 16, 32, 64, 128, 256]
-    return YOLO(width, depth, num_classes)
-
-
-def yolo_v8_t(num_classes: int = 80):
-    depth = [1, 2, 2]
-    width = [3, 24, 48, 96, 192, 384]
-    return YOLO(width, depth, num_classes)
-
-
-def yolo_v8_s(num_classes: int = 80):
-    depth = [1, 2, 2]
-    width = [3, 32, 64, 128, 256, 512]
-    return YOLO(width, depth, num_classes)
-
-
-def yolo_v8_m(num_classes: int = 80):
-    depth = [2, 4, 4]
-    width = [3, 48, 96, 192, 384, 576]
-    return YOLO(width, depth, num_classes)
-
-
-def yolo_v8_l(num_classes: int = 80):
-    depth = [3, 6, 6]
-    width = [3, 64, 128, 256, 512, 512]
-    return YOLO(width, depth, num_classes)
-
-
-def yolo_v8_x(num_classes: int = 80):
-    depth = [3, 6, 6]
-    width = [3, 80, 160, 320, 640, 640]
-    return YOLO(width, depth, num_classes)
+# Factory functions
+def yolo_v8_n(num_classes=80): return YOLO([3, 16, 32, 64, 128, 256], [1, 2, 2], num_classes)
+def yolo_v8_t(num_classes=80): return YOLO([3, 24, 48, 96, 192, 384], [1, 2, 2], num_classes)
+def yolo_v8_s(num_classes=80): return YOLO([3, 32, 64, 128, 256, 512], [1, 2, 2], num_classes)
+def yolo_v8_m(num_classes=80): return YOLO([3, 48, 96, 192, 384, 576], [2, 4, 4], num_classes)
+def yolo_v8_l(num_classes=80): return YOLO([3, 64, 128, 256, 512, 512], [3, 6, 6], num_classes)
+def yolo_v8_x(num_classes=80): return YOLO([3, 80, 160, 320, 640, 640], [3, 6, 6], num_classes)
