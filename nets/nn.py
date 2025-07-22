@@ -52,19 +52,21 @@ class CSP(torch.nn.Module):
         self.res_m = torch.nn.ModuleList(Residual(out_ch // 2, add) for _ in range(n))
 
     def forward(self, x):
-        y = list(self.conv1(x).chunk(2, 1))
+        y_list = list(self.conv1(x).chunk(2, 1))
         for m in self.res_m:
-            y.append(m(y[-1]))
+            y_list.append(m(y_list[-1]))
 
-        # Concatenation handling for quantized tensors
-        if any(t.is_quantized for t in y):
-            # torch.cat does not support quantized directly
-            y = [t.dequantize() if t.is_quantized else t for t in y]
-            y = torch.cat(y, dim=1).quantize_per_tensor(y[0].q_scale(), y[0].q_zero_point(), torch.quint8)
+        # Handle quantized tensors safely
+        if any(t.is_quantized for t in y_list):
+            dequantized = [t.dequantize() if t.is_quantized else t for t in y_list]
+            y_cat = torch.cat(dequantized, dim=1)
+            scale = x.q_scale() if x.is_quantized else 1.0
+            zero_point = x.q_zero_point() if x.is_quantized else 0
+            y_out = torch.quantize_per_tensor(y_cat, scale=scale, zero_point=zero_point, dtype=torch.quint8)
         else:
-            y = torch.cat(y, dim=1)
-        return self.conv2(y)
+            y_out = torch.cat(y_list, dim=1)
 
+        return self.conv2(y_out)
 
 
 class SPP(torch.nn.Module):
@@ -157,8 +159,12 @@ class Head(torch.nn.Module):
 
     def forward(self, p3, p4, p5):
         x = [p3, p4, p5]
-        return [torch.cat((box(f), cls(f)), 1) for f, box, cls in zip(x, self.box, self.cls)]
-
+        outputs = []
+        for i in range(len(x)):
+            box_out = self.box[i](x[i])
+            cls_out = self.cls[i](x[i])
+            outputs.append(torch.cat((box_out, cls_out), dim=1))
+        return outputs
 
 class YOLO(torch.nn.Module):
     def __init__(self, width, depth, num_classes):
