@@ -469,7 +469,7 @@ class Assigner:
             target_scores = F.pad(target_scores, (0, padding_size), value=0)
 
         fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)
-        target_scores = torch.where(fg_scores_mask > 0, target_scores, torch.zeros_like(target_scores))
+        target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
 
         align_metric *= mask_pos
         pos_align_metrics = align_metric.amax(axis=-1, keepdim=True)
@@ -553,10 +553,9 @@ class ComputeLoss:
 
         scores = pred_scores.detach().sigmoid()
         bboxes = (pred_bboxes.detach() * strides).type(gt_bboxes.dtype)
-        assign_results = self.assigner(scores, bboxes, anchors * strides, gt_labels, gt_bboxes, mask_gt)
-        fg_mask = assign_results[0].bool()   # shape: [32, 8400]
-        target_bboxes = assign_results[1]   # shape: [32, 8400, 4]
-        target_scores = assign_results[2]         # shape: [32, 8400, 80]
+        target_bboxes, target_scores, fg_mask, _ = self.assigner(scores, bboxes,
+                                                                 anchors * strides,
+                                                                 gt_labels, gt_bboxes, mask_gt)
         target_scores_sum = max(target_scores.sum(), 1)
 
         # cls loss
