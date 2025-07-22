@@ -8,7 +8,10 @@ class SiLU(torch.nn.Module):
         self.sigmoid = torch.nn.Sigmoid()
 
     def forward(self, x):
-        return x * self.sigmoid(x)  # نیازی به FloatFunctional نیست
+        if x.is_quantized:
+            return torch.ops.quantized.mul(x, self.sigmoid(x), scale=x.q_scale(), zero_point=x.q_zero_point())
+        else:
+            return torch.nn.functional.relu(x) * self.sigmoid(x)
 
 
 class Conv(torch.nn.Module):
@@ -32,7 +35,13 @@ class Residual(torch.nn.Module):
     def forward(self, x):
         y = self.conv1(x)
         y = self.conv2(y)
-        return x + y if self.add_m else y  # حذف FloatFunctional
+        if self.add_m:
+            if x.is_quantized and y.is_quantized:
+                return torch.ops.quantized.add(x, y, scale=x.q_scale(), zero_point=x.q_zero_point())
+            else:
+                return x + y
+        else:
+            return y
 
 
 class CSP(torch.nn.Module):
@@ -44,8 +53,18 @@ class CSP(torch.nn.Module):
 
     def forward(self, x):
         y = list(self.conv1(x).chunk(2, 1))
-        y.extend(m(y[-1]) for m in self.res_m)
-        return self.conv2(torch.cat(y, dim=1))  # حذف FloatFunctional
+        for m in self.res_m:
+            y.append(m(y[-1]))
+
+        # Concatenation handling for quantized tensors
+        if any(t.is_quantized for t in y):
+            # torch.cat does not support quantized directly
+            y = [t.dequantize() if t.is_quantized else t for t in y]
+            y = torch.cat(y, dim=1).quantize_per_tensor(y[0].q_scale(), y[0].q_zero_point(), torch.quint8)
+        else:
+            y = torch.cat(y, dim=1)
+        return self.conv2(y)
+
 
 
 class SPP(torch.nn.Module):

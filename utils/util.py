@@ -460,12 +460,16 @@ class Assigner:
         target_labels.clamp_(0)
 
         target_scores = torch.zeros((target_labels.shape[0], target_labels.shape[1], self.num_classes),
-                                    dtype=torch.int64,
+                                    dtype=torch.float32,
                                     device=target_labels.device)
         target_scores.scatter_(2, target_labels.unsqueeze(-1), 1)
+        target_scores = target_scores.float()
+        if target_scores.shape[-1] != self.num_classes:
+            padding_size = self.num_classes - target_scores.shape[-1]
+            target_scores = F.pad(target_scores, (0, padding_size), value=0)
 
         fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)
-        target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
+        target_scores = torch.where(fg_scores_mask > 0, target_scores, torch.zeros_like(target_scores))
 
         align_metric *= mask_pos
         pos_align_metrics = align_metric.amax(axis=-1, keepdim=True)
@@ -549,18 +553,13 @@ class ComputeLoss:
 
         scores = pred_scores.detach().sigmoid()
         bboxes = (pred_bboxes.detach() * strides).type(gt_bboxes.dtype)
-        target_bboxes, target_scores, fg_mask, _ = self.assigner(scores, bboxes,
-                                                                 anchors * strides,
-                                                                 gt_labels, gt_bboxes, mask_gt)
-
+        assign_results = self.assigner(scores, bboxes, anchors * strides, gt_labels, gt_bboxes, mask_gt)
+        fg_mask = assign_results[0].bool()   # shape: [32, 8400]
+        target_bboxes = assign_results[1]   # shape: [32, 8400, 4]
+        target_scores = assign_results[2]         # shape: [32, 8400, 80]
         target_scores_sum = max(target_scores.sum(), 1)
 
         # cls loss
-        # if target_scores.shape[-1] != pred_scores.shape[-1]:
-        #     num_classes = pred_scores.shape[-1]
-        #     target_scores_onehot = torch.zeros_like(pred_scores)
-        #     target_scores_onehot.scatter_(-1, target_scores.long(), 1.0)
-        #     target_scores = target_scores_onehot
         loss_cls = self.cls_loss(pred_scores, target_scores.to(pred_scores.dtype)).sum()
         loss_cls = loss_cls / target_scores_sum
 

@@ -181,7 +181,7 @@ class Dataset(data.Dataset):
     @staticmethod
     def collate_fn(batch):
         samples, cls, box, indices = zip(*batch)
-
+        cls = [c if c.dim() == 2 else c.unsqueeze(1) for c in cls]
         cls = torch.cat(cls, 0)
         box = torch.cat(box, 0)
 
@@ -198,8 +198,14 @@ class Dataset(data.Dataset):
     @staticmethod
     def load_label(filenames):
         path = f'{os.path.dirname(filenames[0])}.cache'
+        import numpy as np
         if os.path.exists(path):
-            return torch.load(path)
+            with torch.serialization.safe_globals([
+                np.ndarray,
+                np._core.multiarray._reconstruct
+            ]):
+                return torch.load(path, weights_only=False)
+        
         x = {}
         for filename in filenames:
             try:
@@ -214,8 +220,9 @@ class Dataset(data.Dataset):
                 # verify labels
                 a = f'{os.sep}images{os.sep}'
                 b = f'{os.sep}labels{os.sep}'
-                if os.path.isfile(b.join(filename.rsplit(a, 1)).rsplit('.', 1)[0] + '.txt'):
-                    with open(b.join(filename.rsplit(a, 1)).rsplit('.', 1)[0] + '.txt') as f:
+                label_path = b.join(filename.rsplit(a, 1)).rsplit('.', 1)[0] + '.txt'
+                if os.path.isfile(label_path):
+                    with open(label_path) as f:
                         label = [x.split() for x in f.read().strip().splitlines() if len(x)]
                         label = numpy.array(label, dtype=numpy.float32)
                     nl = len(label)
@@ -236,6 +243,7 @@ class Dataset(data.Dataset):
                 pass
             except AssertionError:
                 pass
+
         torch.save(x, path)
         return x
 

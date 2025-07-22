@@ -30,7 +30,7 @@ def train(args, params):
 
     # Model
     model = nn.yolo_v8_n(len(params['names']))
-    state = torch.load('./weights/v8_n.pth')['model']
+    state = torch.load('./weights/v8_n.pth', weights_only=False)['model']
     model.load_state_dict(state.float().state_dict())
     model.eval()
 
@@ -201,7 +201,7 @@ def test(args, params, model=None):
     loader = data.DataLoader(dataset, args.batch_size // 2, False, num_workers=8,
                              pin_memory=True, collate_fn=Dataset.collate_fn)
     if model is None:
-        model = torch.jit.load(f='./weights/best.ts')
+        model = torch.load(f='./weights/best.ts')
 
     device = torch.device('cpu')
     model.to(device)
