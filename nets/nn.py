@@ -158,13 +158,19 @@ class Head(torch.nn.Module):
         ) for x in ch)
 
     def forward(self, p3, p4, p5):
-        x = [p3, p4, p5]
-        outputs = []
-        for i in range(len(x)):
-            box_out = self.box[i](x[i])
-            cls_out = self.cls[i](x[i])
-            outputs.append(torch.cat((box_out, cls_out), dim=1))
-        return outputs
+        box_out0 = self.box[0](p3)
+        cls_out0 = self.cls[0](p3)
+        out0 = torch.cat((box_out0, cls_out0), dim=1)
+
+        box_out1 = self.box[1](p4)
+        cls_out1 = self.cls[1](p4)
+        out1 = torch.cat((box_out1, cls_out1), dim=1)
+
+        box_out2 = self.box[2](p5)
+        cls_out2 = self.cls[2](p5)
+        out2 = torch.cat((box_out2, cls_out2), dim=1)
+
+        return [out0, out1, out2]
 
 class YOLO(torch.nn.Module):
     def __init__(self, width, depth, num_classes):
