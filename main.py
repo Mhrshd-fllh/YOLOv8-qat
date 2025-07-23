@@ -201,7 +201,7 @@ def test(args, params, model=None):
     loader = data.DataLoader(dataset, args.batch_size // 2, False, num_workers=8,
                              pin_memory=True, collate_fn=Dataset.collate_fn)
     if model is None:
-        model = torch.load(f='./weights/best.ts')
+        model = torch.load(f='./weights/best.ts', weights_only=True)
 
     device = torch.device('cpu')
     model.to(device)
