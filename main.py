@@ -14,6 +14,12 @@ from nets import nn
 from utils import util
 from utils.dataset import Dataset
 
+import time
+import csv
+import pandas as pd
+import matplotlib.pyplot as plt
+from prettytable import PrettyTable
+
 warnings.filterwarnings("ignore")
 
 
@@ -30,7 +36,7 @@ def train(args, params):
 
     # Model
     model = nn.yolo_v8_n(len(params['names']))
-    state = torch.load('./weights/v8_n.pth', weights_only=False)['model']
+    state = torch.load('./weights/v8_n.pth')['model']
     model.load_state_dict(state.float().state_dict())
     model.eval()
 
@@ -201,63 +207,104 @@ def test(args, params, model=None):
     loader = data.DataLoader(dataset, args.batch_size // 2, False, num_workers=8,
                              pin_memory=True, collate_fn=Dataset.collate_fn)
     if model is None:
-        model = torch.load(f='./weights/best.ts', weights_only=False)
+        model = torch.jit.load(f='./weights/best.ts')
 
     device = torch.device('cpu')
     model.to(device)
     model.eval()
 
-    # Configure
-    iou_v = torch.linspace(0.5, 0.95, 10, device=device)  # iou vector for mAP@0.5:0.95
+    iou_v = torch.linspace(0.5, 0.95, 10, device=device)
     n_iou = iou_v.numel()
+
+    metrics = []
+    total_time = 0
+    num_images = 0
 
     m_pre = 0.
     m_rec = 0.
     map50 = 0.
     mean_ap = 0.
-    metrics = []
+
     p_bar = tqdm.tqdm(loader, desc=('%10s' * 4) % ('precision', 'recall', 'mAP50', 'mAP'))
     for samples, targets in p_bar:
-        samples = samples.to(device)
-        samples = samples.float()  # uint8 to fp16/32
-        samples = samples / 255.0  # 0 - 255 to 0.0 - 1.0
-        _, _, h, w = samples.shape  # batch size, channels, height, width
+        start = time.perf_counter()
+
+        samples = samples.to(device).float() / 255.0
+        b, _, h, w = samples.shape
         scale = torch.tensor((w, h, w, h), device=device)
-        # Inference
+        num_images += b
+
         outputs = model(samples)
-        # NMS
+
+        end = time.perf_counter()
+        total_time += end - start
+
         outputs = util.non_max_suppression(outputs, 0.001, 0.7, model.nc)
-        # Metrics
+
         for i, output in enumerate(outputs):
             idx = targets['idx'] == i
-            cls = targets['cls'][idx]
-            box = targets['box'][idx]
-
-            cls = cls.to(device)
-            box = box.to(device)
+            cls = targets['cls'][idx].to(device)
+            box = targets['box'][idx].to(device)
 
             metric = torch.zeros(output.shape[0], n_iou, dtype=torch.bool, device=device)
-
             if output.shape[0] == 0:
                 if cls.shape[0]:
                     metrics.append((metric, *torch.zeros((2, 0), device=device), cls.squeeze(-1)))
                 continue
-            # Evaluate
+
             if cls.shape[0]:
                 target = torch.cat((cls, util.wh2xy(box) * scale), 1)
                 metric = util.compute_metric(output[:, :6], target, iou_v)
-            # Append
+
             metrics.append((metric, output[:, 4], output[:, 5], cls.squeeze(-1)))
 
-    # Compute metrics
-    metrics = [torch.cat(x, 0).cpu().numpy() for x in zip(*metrics)]  # to numpy
+    metrics = [torch.cat(x, 0).cpu().numpy() for x in zip(*metrics)]
     if len(metrics) and metrics[0].any():
         tp, fp, m_pre, m_rec, map50, mean_ap = util.compute_ap(*metrics)
-    # Print results
-    print('%10.3g' * 4 % (m_pre, m_rec, map50, mean_ap))
-    # Return results
-    model.float()  # for training
+
+    if num_images > 0:
+        avg_time = total_time / num_images
+        fps = 1.0 / avg_time
+    else:
+        avg_time = 0
+        fps = 0
+
+    # ذخیره به CSV
+    summary_path = 'weights/metrics_summary.csv'
+    with open(summary_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['mAP', 'mAP@50', 'Recall', 'Precision', 'Time/Image', 'FPS'])
+        writer.writeheader()
+        writer.writerow({
+            'mAP': f'{mean_ap:.4f}',
+            'mAP@50': f'{map50:.4f}',
+            'Recall': f'{m_rec:.4f}',
+            'Precision': f'{m_pre:.4f}',
+            'Time/Image': f'{avg_time:.4f}',
+            'FPS': f'{fps:.2f}',
+        })
+
+    print(f'[INFO] Evaluation results saved to {summary_path}')
+    per_class_metrics = util.compute_ap_per_class(*metrics, iouv=iou_v)
+
+    per_class_path = 'weights/per_class_metrics.csv'
+    with open(per_class_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['class_id', 'precision', 'recall', 'AP@50', 'mAP@50-95', 'GT', 'Pred'])
+        writer.writeheader()
+        for cls_id, cls_metrics in per_class_metrics.items():
+            writer.writerow({
+                'class_id': cls_id,
+                'precision': f'{cls_metrics["precision"]:.4f}',
+                'recall': f'{cls_metrics["recall"]:.4f}',
+                'AP@50': f'{cls_metrics["ap50"]:.4f}',
+                'mAP@50-95': f'{cls_metrics["ap"]:.4f}',
+                'GT': cls_metrics['n_gt'],
+                'Pred': cls_metrics['n_pred'],
+            })
+
+    print(f'[INFO] Per-class metrics saved to {per_class_path}')
+
     return mean_ap, map50, m_rec, m_pre
+
 
 
 def profile(args, params):
@@ -281,19 +328,19 @@ def main():
     parser = ArgumentParser()
     parser.add_argument('--input-size', default=640, type=int)
     parser.add_argument('--batch-size', default=32, type=int)
+    parser.add_argument('--local_rank', default=0, type=int)
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--train', action='store_true')
     parser.add_argument('--test', action='store_true')
-    parser.add_argument('--local_rank', default=0, type=int, help='For distributed training')
 
     args = parser.parse_args()
 
-    args.local_rank = int(os.environ.get('LOCAL_RANK', args.local_rank))
-    args.world_size = int(os.environ.get('WORLD_SIZE', 1))
-    args.distributed = args.world_size > 1
+    args.local_rank = int(os.getenv('LOCAL_RANK', 0))
+    args.world_size = int(os.getenv('WORLD_SIZE', 1))
+    args.distributed = int(os.getenv('WORLD_SIZE', 1)) > 1
 
     if args.distributed:
-        torch.cuda.set_device(args.local_rank)
+        torch.cuda.set_device(device=args.local_rank)
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
 
     if args.local_rank == 0:

@@ -161,8 +161,8 @@ def smooth(y, f=0.05):
 def compute_ap(tp, conf, pred_cls, target_cls, eps=1E-16):
     """
     Compute the average precision, given the recall and precision curves.
-    # Arguments
     Source: https://github.com/rafaelpadilla/Object-Detection-Metrics.
+    # Arguments
         tp:  True positives (nparray, nx1 or nx10).
         conf:  Object-ness value from 0-1 (nparray).
         pred_cls:  Predicted object classes (nparray).
@@ -227,6 +227,91 @@ def compute_ap(tp, conf, pred_cls, target_cls, eps=1E-16):
     map50, mean_ap = ap50.mean(), ap.mean()
     return tp, fp, m_pre, m_rec, map50, mean_ap
 
+def compute_ap_per_class(tp, conf, pred_cls, target_cls, iouv):
+    """
+    Compute per-class Average Precision (AP) and related metrics.
+
+    Args:
+        tp (ndarray): shape (N, num_iou_thresholds), True positives matrix
+        conf (ndarray): shape (N,), confidence scores
+        pred_cls (ndarray): shape (N,), predicted class indices
+        target_cls (ndarray): shape (M,), ground truth class indices
+        iouv (Tensor): IoU thresholds, e.g. torch.linspace(0.5, 0.95, 10)
+
+    Returns:
+        dict: class-wise dictionary with precision, recall, ap50, ap (mAP), n_gt, n_pred
+    """
+    metrics = {}
+    classes = numpy.unique(numpy.concatenate((pred_cls, target_cls)))
+    iouv = iouv.cpu().numpy()
+    niou = len(iouv)
+
+    for c in classes:
+        cls_pred_idx = pred_cls == c
+        cls_gt = target_cls == c
+        n_gt = cls_gt.sum()
+        n_pred = cls_pred_idx.sum()
+
+        if n_pred == 0 and n_gt == 0:
+            continue
+
+        if n_pred == 0 or n_gt == 0:
+            metrics[int(c)] = {
+                'precision': 0.0,
+                'recall': 0.0,
+                'ap50': 0.0,
+                'ap': 0.0,
+                'n_gt': int(n_gt),
+                'n_pred': int(n_pred)
+            }
+            continue
+
+        tp_c = tp[cls_pred_idx]
+        conf_c = conf[cls_pred_idx]
+
+        sort_idx = numpy.argsort(-conf_c)
+        tp_c = tp_c[sort_idx]
+
+        ap_all = []
+        precision_final = 0.0
+        recall_final = 0.0
+
+        for i in range(niou):
+            tpi = tp_c[:, i]
+            fpi = 1 - tpi
+
+            tpc = numpy.cumsum(tpi)
+            fpc = numpy.cumsum(fpi)
+
+            recall_curve = tpc / (n_gt + 1e-16)
+            precision_curve = tpc / (tpc + fpc + 1e-16)
+
+            if i == 0:
+                if precision_curve.shape[0] > 0:
+                    precision_final = precision_curve[-1]
+                    recall_final = recall_curve[-1]
+
+            mrec = numpy.concatenate(([0.], recall_curve, [1.]))
+            mpre = numpy.concatenate(([0.], precision_curve, [0.]))
+
+            for j in range(mpre.size - 1, 0, -1):
+                mpre[j - 1] = max(mpre[j - 1], mpre[j])
+
+            indices = numpy.where(mrec[1:] != mrec[:-1])[0]
+            ap = numpy.sum((mrec[indices + 1] - mrec[indices]) * mpre[indices + 1])
+            ap_all.append(ap)
+
+        ap_all = numpy.array(ap_all)
+        metrics[int(c)] = {
+            'precision': float(precision_final),
+            'recall': float(recall_final),
+            'ap50': float(ap_all[0]),
+            'ap': float(ap_all.mean()),
+            'n_gt': int(n_gt),
+            'n_pred': int(n_pred)
+        }
+
+    return metrics
 
 def compute_iou(box1, box2, eps=1E-7):
     # Returns Intersection over Union (IoU) of box1(1,4) to box2(n,4)
@@ -460,13 +545,9 @@ class Assigner:
         target_labels.clamp_(0)
 
         target_scores = torch.zeros((target_labels.shape[0], target_labels.shape[1], self.num_classes),
-                                    dtype=torch.float32,
+                                    dtype=torch.int64,
                                     device=target_labels.device)
         target_scores.scatter_(2, target_labels.unsqueeze(-1), 1)
-        target_scores = target_scores.float()
-        if target_scores.shape[-1] != self.num_classes:
-            padding_size = self.num_classes - target_scores.shape[-1]
-            target_scores = F.pad(target_scores, (0, padding_size), value=0)
 
         fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)
         target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
@@ -476,7 +557,7 @@ class Assigner:
         pos_overlaps = (overlaps * mask_pos).amax(axis=-1, keepdim=True)
         norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
         target_scores = target_scores * norm_align_metric
-        
+
         return target_bboxes, target_scores, fg_mask.bool(), target_gt_idx
 
 
@@ -556,6 +637,7 @@ class ComputeLoss:
         target_bboxes, target_scores, fg_mask, _ = self.assigner(scores, bboxes,
                                                                  anchors * strides,
                                                                  gt_labels, gt_bboxes, mask_gt)
+
         target_scores_sum = max(target_scores.sum(), 1)
 
         # cls loss

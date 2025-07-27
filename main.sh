@@ -1,3 +1,2 @@
 GPUS=$1
-shift
-torchrun --nproc_per_node=$GPUS main.py "$@"
+python3 -m torch.distributed.launch --nproc_per_node=$GPUS main.py ${@:2}
